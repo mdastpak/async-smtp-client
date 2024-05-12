@@ -141,7 +141,7 @@ func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := map[string]string{
-		"params": req.Recipient + ", " + req.Subject + ", " + req.Body,
+		// "params": req.Recipient + ", " + req.Subject + ", " + req.Body,
 		"uuid":   uuid,
 		"dt":     getDateTime(r, now),
 		"status": "queued",
