@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"net/smtp"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,13 +21,15 @@ import (
 	"github.com/joho/godotenv"
 )
 
+var ctx = context.Background()
 var (
 	rdb *redis.Client
 )
 
 // EmailRequest represents an email dispatch request with multiple recipients
 type EmailRequest struct {
-	Recipients  []string  `json:"recipients"` // Changed to a slice of strings
+	UUID        uuid.UUID `json:"uuid,omitempty"` // Added UUID field for tracking
+	Recipients  []string  `json:"recipients"`     // Changed to a slice of strings
 	Subject     string    `json:"subject"`
 	Body        string    `json:"body"`
 	ScheduledAt time.Time `json:"scheduled_at,omitempty"`
@@ -49,6 +55,8 @@ func main() {
 
 	loadEnv()
 	setupRedis()
+
+	go EmailSendingWorker()
 
 	r := mux.NewRouter()
 	setupRoutes(r)
@@ -125,27 +133,39 @@ func welcomeHandler(w http.ResponseWriter, r *http.Request) {
 func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 	var req EmailRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		RespondToClient(w, "Request Register Failed.", http.StatusBadRequest, err.Error())
+		RespondToClient(w, "Registration Failed.", http.StatusBadRequest, err.Error())
 		return
 	}
-	uuid := uuid.NewString()
+	uuid, err := uuid.NewUUID()
+	if err != nil {
+		RespondToClient(w, "Registration Failed.", http.StatusInternalServerError, "Failed to generate UUID.")
+		return
+	}
+
+	req.UUID = uuid
 
 	// Serialize recipients array to JSON string for storage
 	recipientsData, err := json.Marshal(req.Recipients)
 	if err != nil {
-		RespondToClient(w, "Request Register Failed.", http.StatusInternalServerError, "Not as a valid JSON array.")
+		RespondToClient(w, "Registration Failed.", http.StatusInternalServerError, "Not as a valid JSON array.")
 		return
 	}
 
 	if recipientsData == nil || len(req.Recipients) == 0 {
-		RespondToClient(w, "Request Register Failed.", http.StatusBadRequest, "No recipients provided.")
+		RespondToClient(w, "Registration Failed.", http.StatusBadRequest, "No recipients provided.")
+		return
+	}
+
+	emailData, _ := json.Marshal(req)
+	if err := rdb.RPush(ctx, "emailQueue", emailData).Err(); err != nil {
+		RespondToClient(w, "Registration Failed.", http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	// Store in Redis
 	now := time.Now().UTC()
-	if err := rdb.HSet(r.Context(), uuid, "recipients", recipientsData, "subject", req.Subject, "body", req.Body, "status", "queued", "created_at", now).Err(); err != nil {
-		RespondToClient(w, "Request Register Failed.", http.StatusInternalServerError, err.Error())
+	if err := rdb.HSet(r.Context(), uuid.String(), "recipients", recipientsData, "subject", req.Subject, "body", req.Body, "status", "queued", "created_at", now).Err(); err != nil {
+		RespondToClient(w, "Registration Failed.", http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -154,7 +174,7 @@ func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 		"created_at": getDateTime(r, now),
 		"status":     "queued",
 	}
-	RespondToClient(w, "Request Registered Successfully", http.StatusOK, response)
+	RespondToClient(w, "Registration Successfully", http.StatusOK, response)
 }
 
 // GetEmailStatusHandler retrieves the status of a dispatched email
@@ -208,4 +228,101 @@ func GetEmailStatusHandler(w http.ResponseWriter, r *http.Request) {
 		response["tried_at"] = getDateTime(r, triedAtTime)
 	}
 	RespondToClient(w, "Request Inquiry", http.StatusOK, response)
+}
+
+func SendEmail(recipient []string, subject, body string) error {
+	smtpHost := os.Getenv("SMTP_SERVER")
+	smtpPort := os.Getenv("SMTP_PORT")
+	title := os.Getenv("SMTP_TITLE")
+	from := os.Getenv("SMTP_USERNAME")
+	password := os.Getenv("SMTP_PASSWORD")
+	insecure := os.Getenv("SMTP_INSECURE") == "true"
+
+	// Set the sender's address using the title from the environment variable
+	sender := fmt.Sprintf("%s <%s>", title, from)
+
+	// TLS configuration
+	tlsConfig := &tls.Config{
+		ServerName:         smtpHost,
+		InsecureSkipVerify: insecure,
+	}
+
+	// Connect to the SMTP server via TLS
+	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%s", smtpHost, smtpPort), tlsConfig)
+	if err != nil {
+		return fmt.Errorf("failed to connect to SMTP server via TLS: %v", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, smtpHost)
+	if err != nil {
+		return fmt.Errorf("failed to create SMTP client: %v", err)
+	}
+	defer client.Quit()
+
+	// Authenticate and set up the message
+	auth := smtp.PlainAuth("", from, password, smtpHost)
+	if err := client.Auth(auth); err != nil {
+		return fmt.Errorf("failed to authenticate: %v", err)
+	}
+
+	if err := client.Mail(from); err != nil {
+		return fmt.Errorf("failed to set mail sender: %v", err)
+	}
+
+	if err := client.Rcpt(strings.Join(recipient, ";")); err != nil {
+		return fmt.Errorf("failed to set recipient: %v", err)
+	}
+
+	wc, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("failed to send email data: %v", err)
+	}
+	defer wc.Close()
+
+	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
+		sender, recipient, subject, body)
+
+	_, err = wc.Write([]byte(msg))
+	if err != nil {
+		return fmt.Errorf("failed to write message: %v", err)
+	}
+
+	return nil
+}
+
+func EmailSendingWorker() {
+	for {
+		emailData, err := rdb.LPop(ctx, "emailQueue").Result()
+		if err == redis.Nil {
+			time.Sleep(1 * time.Second) // Wait for 1 second if the queue is empty
+			continue
+		} else if err != nil {
+			log.Printf("Error fetching from queue: %v", err)
+			continue
+		}
+
+		fmt.Println(emailData, "Email Sending Worker")
+
+		var req EmailRequest
+		if err := json.Unmarshal([]byte(emailData), &req); err != nil {
+			log.Printf("Error decoding email request: %v", err)
+			continue
+		}
+
+		err = SendEmail(req.Recipients, req.Subject, req.Body)
+		if err != nil {
+			log.Printf("Failed to send email: %v", err)
+			// Update Redis with failed status
+			rdb.HSet(ctx, req.UUID.String(), "status", "failed", "error", err.Error(), "tried_at", time.Now().UTC())
+
+			// You should have a way to relate this failure back to the specific request, e.g., using a UUID.
+			continue
+		}
+		// Update Redis with sent status
+		rdb.HSet(ctx, req.UUID.String(), "status", "sent", "sent_at", time.Now().UTC())
+
+		// Similar to above, ensure you update the correct request's status.
+		log.Println("Email sent successfully.")
+	}
 }
