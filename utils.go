@@ -30,8 +30,11 @@ func RespondToClient(w http.ResponseWriter, message string, status int, result i
 }
 
 // Handlers and Timezone Utilities
-func getDateTime(r *http.Request) string {
+func getDateTime(r *http.Request, dt time.Time) string {
 	loc := setTimezoneLocation(r)
+	if !dt.IsZero() {
+		return dt.In(loc).Format(time.RFC3339)
+	}
 	return time.Now().In(loc).Format(time.RFC3339)
 }
 

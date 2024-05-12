@@ -30,6 +30,13 @@ type EmailRequest struct {
 	ScheduledAt time.Time `json:"scheduled_at,omitempty"`
 }
 
+// EmailStatus represents the status of an email dispatch
+type EmailStatus struct {
+	Status string `json:"status"`
+	SentAt string `json:"sent_at,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
 func loadEnv() {
 	if err := godotenv.Load(); err != nil {
 		log.Fatalf("Error loading .env file: %v", err)
@@ -83,6 +90,7 @@ func setupRoutes(router *mux.Router) {
 
 	router.HandleFunc("/", welcomeHandler).Methods("GET")
 	router.HandleFunc("/submit", PostEmailHandler).Methods("POST")
+	router.HandleFunc("/status", GetEmailStatusHandler).Methods("GET")
 
 }
 
@@ -108,7 +116,7 @@ func welcomeHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]string{
 		"message": "Welcome to the Async Mail Sender Service",
-		"dt":      getDateTime(r),
+		"dt":      getDateTime(r, time.Now()),
 	}
 	RespondToClient(w, "Welcome", http.StatusOK, response)
 }
@@ -117,23 +125,76 @@ func welcomeHandler(w http.ResponseWriter, r *http.Request) {
 func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 	var req EmailRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		RespondToClient(w, "Request Register Failed.", http.StatusBadRequest, err.Error())
+		// http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	uuid := uuid.NewString()
 
 	fmt.Println(req)
+
 	// Store in Redis
-	if err := rdb.HSet(r.Context(), uuid, "recipient", req.Recipient, "subject", req.Subject, "body", req.Body, "status", "queued").Err(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	now := time.Now().UTC()
+	if err := rdb.HSet(r.Context(), uuid, "recipient", req.Recipient, "subject", req.Subject, "body", req.Body, "status", "queued", "created_at", now).Err(); err != nil {
+		RespondToClient(w, "Request Register Failed.", http.StatusInternalServerError, err.Error())
+		// http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	response := map[string]string{
 		"params": req.Recipient + ", " + req.Subject + ", " + req.Body,
 		"uuid":   uuid,
-		"dt":     getDateTime(r),
+		"dt":     getDateTime(r, now),
 		"status": "queued",
 	}
 	RespondToClient(w, "Request Register", http.StatusOK, response)
 
+}
+
+// GetEmailStatusHandler retrieves the status of a dispatched email
+func GetEmailStatusHandler(w http.ResponseWriter, r *http.Request) {
+	req_uuid := r.URL.Query().Get("uuid")
+
+	if _, err := uuid.Parse(req_uuid); err != nil {
+		RespondToClient(w, "Invalid requested UUID", http.StatusBadRequest, nil)
+		return
+	}
+
+	values, err := rdb.HGetAll(r.Context(), req_uuid).Result()
+	if err != nil {
+		RespondToClient(w, "Internal Server Error", http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(values) == 0 {
+		RespondToClient(w, "Invalid requested UUID", http.StatusNotFound, nil)
+		return
+	}
+
+	fmt.Println(values)
+
+	status := EmailStatus{
+		Status: values["status"],
+		Error:  values["error"],
+	}
+	if status.Status == "queued" {
+		status.Status = "pending"
+	}
+
+	if sentAt, ok := values["sent_at"]; ok {
+		sentAtTime, _ := time.Parse(time.RFC3339, sentAt)
+		status.SentAt = getDateTime(r, sentAtTime)
+	}
+
+	response := map[string]string{
+		"uuid":   req_uuid,
+		"status": status.Status,
+	}
+
+	if status.Status == "succeeded" || status.Status == "failed" {
+		response["sent_at"] = status.SentAt
+	}
+
+	if status.Status == "failed" {
+		response["error"] = status.Error
+	}
+	RespondToClient(w, "Request Inquiry", http.StatusOK, response)
 }
