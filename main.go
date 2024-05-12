@@ -68,5 +68,10 @@ func setupRoutes(router *mux.Router) {
 }
 
 func welcomeHandler(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("Welcome to the Server"))
+
+	response := map[string]string{
+		"message": "Welcome to the Async Mail Sender Service",
+		"dt":      getDateTime(r),
+	}
+	RespondToClient(w, "Welcome", http.StatusOK, response)
 }
