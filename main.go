@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -22,9 +21,9 @@ var (
 	rdb *redis.Client
 )
 
-// EmailRequest represents an email dispatch request
+// EmailRequest represents an email dispatch request with multiple recipients
 type EmailRequest struct {
-	Recipient   string    `json:"recipient"`
+	Recipients  []string  `json:"recipients"` // Changed to a slice of strings
 	Subject     string    `json:"subject"`
 	Body        string    `json:"body"`
 	ScheduledAt time.Time `json:"scheduled_at,omitempty"`
@@ -32,9 +31,10 @@ type EmailRequest struct {
 
 // EmailStatus represents the status of an email dispatch
 type EmailStatus struct {
-	Status string `json:"status"`
-	SentAt string `json:"sent_at,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Status    string `json:"status"`
+	SentAt    string `json:"sent_at,omitempty"`
+	Error     string `json:"error,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 func loadEnv() {
@@ -126,28 +126,26 @@ func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 	var req EmailRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		RespondToClient(w, "Request Register Failed.", http.StatusBadRequest, err.Error())
-		// http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	uuid := uuid.NewString()
 
-	fmt.Println(req)
+	// Serialize recipients array to JSON string for storage
+	recipientsData, _ := json.Marshal(req.Recipients)
 
 	// Store in Redis
 	now := time.Now().UTC()
-	if err := rdb.HSet(r.Context(), uuid, "recipient", req.Recipient, "subject", req.Subject, "body", req.Body, "status", "queued", "created_at", now).Err(); err != nil {
+	if err := rdb.HSet(r.Context(), uuid, "recipients", recipientsData, "subject", req.Subject, "body", req.Body, "status", "queued", "created_at", now).Err(); err != nil {
 		RespondToClient(w, "Request Register Failed.", http.StatusInternalServerError, err.Error())
-		// http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	response := map[string]string{
-		// "params": req.Recipient + ", " + req.Subject + ", " + req.Body,
-		"uuid":   uuid,
-		"dt":     getDateTime(r, now),
-		"status": "queued",
-	}
-	RespondToClient(w, "Request Register", http.StatusOK, response)
 
+	response := map[string]interface{}{
+		"uuid":       uuid,
+		"created_at": getDateTime(r, now),
+		"status":     "queued",
+	}
+	RespondToClient(w, "Request Registered Successfully", http.StatusOK, response)
 }
 
 // GetEmailStatusHandler retrieves the status of a dispatched email
@@ -169,11 +167,13 @@ func GetEmailStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Println(values)
+	createdAtTime, _ := time.Parse(time.RFC3339, values["created_at"])
+	triedAtTime, _ := time.Parse(time.RFC3339, values["tried_at"])
 
 	status := EmailStatus{
-		Status: values["status"],
-		Error:  values["error"],
+		Status:    values["status"],
+		Error:     values["error"],
+		CreatedAt: getDateTime(r, createdAtTime),
 	}
 	if status.Status == "queued" {
 		status.Status = "pending"
@@ -185,8 +185,9 @@ func GetEmailStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]string{
-		"uuid":   req_uuid,
-		"status": status.Status,
+		"uuid":       req_uuid,
+		"status":     status.Status,
+		"created_at": status.CreatedAt,
 	}
 
 	if status.Status == "succeeded" || status.Status == "failed" {
@@ -195,6 +196,7 @@ func GetEmailStatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	if status.Status == "failed" {
 		response["error"] = status.Error
+		response["tried_at"] = getDateTime(r, triedAtTime)
 	}
 	RespondToClient(w, "Request Inquiry", http.StatusOK, response)
 }
