@@ -131,7 +131,16 @@ func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 	uuid := uuid.NewString()
 
 	// Serialize recipients array to JSON string for storage
-	recipientsData, _ := json.Marshal(req.Recipients)
+	recipientsData, err := json.Marshal(req.Recipients)
+	if err != nil {
+		RespondToClient(w, "Request Register Failed.", http.StatusInternalServerError, "Not as a valid JSON array.")
+		return
+	}
+
+	if recipientsData == nil || len(req.Recipients) == 0 {
+		RespondToClient(w, "Request Register Failed.", http.StatusBadRequest, "No recipients provided.")
+		return
+	}
 
 	// Store in Redis
 	now := time.Now().UTC()
