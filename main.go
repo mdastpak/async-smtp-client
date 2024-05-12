@@ -6,11 +6,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
+)
+
+var (
+	rdb *redis.Client
 )
 
 func loadEnv() {
@@ -24,6 +30,7 @@ func loadEnv() {
 func main() {
 
 	loadEnv()
+	setupRedis()
 
 	r := mux.NewRouter()
 	setupRoutes(r)
@@ -64,6 +71,24 @@ func main() {
 func setupRoutes(router *mux.Router) {
 
 	router.HandleFunc("/", welcomeHandler).Methods("GET")
+
+}
+
+func setupRedis() {
+	redisAddr := os.Getenv("REDIS_HOST") + ":" + os.Getenv("REDIS_PORT")
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+	redisDB, _ := strconv.Atoi(os.Getenv("REDIS_DB"))
+
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     redisAddr,
+		Password: redisPassword,
+		DB:       redisDB,
+	})
+
+	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+	log.Println("Connected to Redis successfully!")
 
 }
 
