@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 )
@@ -18,6 +21,14 @@ import (
 var (
 	rdb *redis.Client
 )
+
+// EmailRequest represents an email dispatch request
+type EmailRequest struct {
+	Recipient   string    `json:"recipient"`
+	Subject     string    `json:"subject"`
+	Body        string    `json:"body"`
+	ScheduledAt time.Time `json:"scheduled_at,omitempty"`
+}
 
 func loadEnv() {
 	if err := godotenv.Load(); err != nil {
@@ -71,6 +82,7 @@ func main() {
 func setupRoutes(router *mux.Router) {
 
 	router.HandleFunc("/", welcomeHandler).Methods("GET")
+	router.HandleFunc("/submit", PostEmailHandler).Methods("POST")
 
 }
 
@@ -99,4 +111,29 @@ func welcomeHandler(w http.ResponseWriter, r *http.Request) {
 		"dt":      getDateTime(r),
 	}
 	RespondToClient(w, "Welcome", http.StatusOK, response)
+}
+
+// PostEmailHandler handles incoming email dispatch requests
+func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
+	var req EmailRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	uuid := uuid.NewString()
+
+	fmt.Println(req)
+	// Store in Redis
+	if err := rdb.HSet(r.Context(), uuid, "recipient", req.Recipient, "subject", req.Subject, "body", req.Body, "status", "queued").Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	response := map[string]string{
+		"params": req.Recipient + ", " + req.Subject + ", " + req.Body,
+		"uuid":   uuid,
+		"dt":     getDateTime(r),
+		"status": "queued",
+	}
+	RespondToClient(w, "Request Register", http.StatusOK, response)
+
 }
