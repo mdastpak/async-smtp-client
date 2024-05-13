@@ -2,50 +2,38 @@ package main
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 )
 
 // RespondToClient writes a standard JSON response to the http.ResponseWriter.
 // message is a description or error message, status is the HTTP status code for the response,
-// and result is an optional payload that can be nil if not used.
-func RespondToClient(w http.ResponseWriter, r *http.Request, message string, status int, result interface{}) {
-	response := map[string]interface{}{
-		"message":     message,
-		"status":      status,
-		"server_time": getDateTime(r, time.Now()),
-	}
-	if result != nil {
-		response["result"] = result
-	}
-	jsonResponse, err := json.Marshal(response)
-	if err != nil {
-		log.Printf("Error marshaling JSON: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
+// and data is an optional payload that can be nil if not used.
+func RespondToClient(w http.ResponseWriter, message string, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(jsonResponse)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": message,
+		"data":    data,
+	})
 }
 
-// Handlers and Timezone Utilities
+// getDateTime returns the current time or provided time in the requested timezone from the HTTP request.
+// It defaults to UTC if no or an invalid timezone is specified.
 func getDateTime(r *http.Request, dt time.Time) string {
-	loc := setTimezoneLocation(r)
-	if !dt.IsZero() {
-		return dt.In(loc).Format(time.RFC3339)
-	}
-	return time.Now().In(loc).Format(time.RFC3339)
-}
+	tz := r.URL.Query().Get("tz") // Retrieve timezone from URL query if provided
+	location := time.UTC          // Default timezone is UTC
 
-func setTimezoneLocation(r *http.Request) *time.Location {
-	tz := r.URL.Query().Get("tz")
 	if tz != "" {
-		if loc, err := time.LoadLocation(tz); err == nil {
-			return loc
+		loc, err := time.LoadLocation(tz)
+		if err == nil {
+			location = loc // Use the parsed timezone
 		}
-		return time.UTC // Default to UTC if timezone is invalid
 	}
-	return time.UTC // Default to UTC if no timezone is specified
+
+	// If dt is the zero time, use the current time
+	if dt.IsZero() {
+		dt = time.Now()
+	}
+	return dt.In(location).Format(time.RFC3339)
 }
