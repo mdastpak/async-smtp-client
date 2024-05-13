@@ -43,13 +43,14 @@ var (
 
 // EmailRequest represents an email dispatch request with multiple recipients
 type EmailRequest struct {
-	UUID      uuid.UUID `json:"uuid,omitempty"`
-	To        []string  `json:"to"`
-	Cc        []string  `json:"cc,omitempty"`  // Carbon copy recipients
-	Bcc       []string  `json:"bcc,omitempty"` // Blind carbon copy recipients
-	Subject   string    `json:"subject"`
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
+	UUID        uuid.UUID `json:"uuid,omitempty"`
+	To          []string  `json:"to"`
+	Cc          []string  `json:"cc,omitempty"`  // Carbon copy recipients
+	Bcc         []string  `json:"bcc,omitempty"` // Blind carbon copy recipients
+	Subject     string    `json:"subject"`
+	Body        string    `json:"body"`
+	CreatedAt   time.Time `json:"created_at"`
+	ScheduledAt time.Time `json:"scheduled_at,omitempty"`
 }
 
 func LoadConfig(path string) (config Config, err error) {
@@ -193,13 +194,21 @@ func checkErr(err error) string {
 // PostEmailHandler handles incoming email dispatch requests
 func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 	var req EmailRequest
+	res := make(map[string]interface{})
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		RespondToClient(w, "Request decoding failed", http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// If timezone is provided, parse the ScheduledAt with the timezone
+	if !req.ScheduledAt.IsZero() {
+		res["scheduled_at"] = req.ScheduledAt
+	}
+
 	// Generate UUID for the new email request
 	req.UUID = uuid.New()
+	res["uuid"] = req.UUID
+	res["status"] = "queued"
 	req.CreatedAt = time.Now().UTC()
 
 	// Serialize the email request data for queueing
@@ -216,10 +225,7 @@ func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Successful response with the request details
-	RespondToClient(w, "Email registered successfully", http.StatusOK, map[string]interface{}{
-		"uuid":   req.UUID,
-		"status": "queued",
-	})
+	RespondToClient(w, "Email registered successfully", http.StatusOK, res)
 }
 
 // GetEmailStatusHandler retrieves the status of a dispatched email
@@ -312,7 +318,7 @@ func SendEmail(req EmailRequest) error {
 
 func EmailSendingWorker() {
 	for {
-		emailData, err := rdb.LPop(ctx, "emailQueue").Result()
+		emailData, err := rdb.BLPop(ctx, 0, "emailQueue").Result()
 		if err == redis.Nil {
 			time.Sleep(1 * time.Second) // Wait for 1 second if the queue is empty
 			continue
@@ -322,8 +328,18 @@ func EmailSendingWorker() {
 		}
 
 		var req EmailRequest
-		if err := json.Unmarshal([]byte(emailData), &req); err != nil {
+		if err := json.Unmarshal([]byte(emailData[1]), &req); err != nil {
 			log.Printf("Error decoding email request: %v", err)
+			continue
+		}
+
+		// Ensure ScheduledAt is compared in UTC
+		nowUTC := time.Now().UTC()
+		scheduledUTC := req.ScheduledAt.UTC()
+		if !scheduledUTC.IsZero() && nowUTC.Before(scheduledUTC) {
+			// Requeue the message to check again later
+			rdb.RPush(ctx, "emailQueue", emailData[1])
+			time.Sleep(1 * time.Second) // Wait for some time before checking again
 			continue
 		}
 
