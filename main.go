@@ -133,7 +133,7 @@ func welcomeHandler(w http.ResponseWriter, r *http.Request) {
 func healthCheck(w http.ResponseWriter, r *http.Request) {
 	redisRes, redisErr := rdb.Ping(ctx).Result()
 
-	smtpHost := os.Getenv("SMTP_HOST")
+	smtpHost := os.Getenv("SMTP_SERVER")
 	smtpPort := os.Getenv("SMTP_PORT")
 	insecure := os.Getenv("SMTP_INSECURE") == "true"
 
@@ -146,7 +146,6 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 	// Connect to the SMTP server via TLS
 	conn, smtpErr := tls.Dial("tcp", fmt.Sprintf("%s:%s", smtpHost, smtpPort), tlsConfig)
 	log.Println("smtpErr", smtpErr)
-
 	if smtpErr == nil {
 		conn.Close()
 	}
