@@ -10,10 +10,11 @@ import (
 // RespondToClient writes a standard JSON response to the http.ResponseWriter.
 // message is a description or error message, status is the HTTP status code for the response,
 // and result is an optional payload that can be nil if not used.
-func RespondToClient(w http.ResponseWriter, message string, status int, result interface{}) {
+func RespondToClient(w http.ResponseWriter, r *http.Request, message string, status int, result interface{}) {
 	response := map[string]interface{}{
-		"message": message,
-		"status":  status,
+		"message":     message,
+		"status":      status,
+		"server_time": getDateTime(r, time.Now()),
 	}
 	if result != nil {
 		response["result"] = result

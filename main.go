@@ -126,19 +126,19 @@ func welcomeHandler(w http.ResponseWriter, r *http.Request) {
 		"message": "Welcome to the Async Mail Sender Service",
 		"dt":      getDateTime(r, time.Now()),
 	}
-	RespondToClient(w, "Welcome", http.StatusOK, response)
+	RespondToClient(w, r, "Welcome", http.StatusOK, response)
 }
 
 // PostEmailHandler handles incoming email dispatch requests
 func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 	var req EmailRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		RespondToClient(w, "Registration Failed.", http.StatusBadRequest, err.Error())
+		RespondToClient(w, r, "Registration Failed.", http.StatusBadRequest, err.Error())
 		return
 	}
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		RespondToClient(w, "Registration Failed.", http.StatusInternalServerError, "Failed to generate UUID.")
+		RespondToClient(w, r, "Registration Failed.", http.StatusInternalServerError, "Failed to generate UUID.")
 		return
 	}
 
@@ -147,25 +147,25 @@ func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 	// Serialize recipients array to JSON string for storage
 	recipientsData, err := json.Marshal(req.Recipients)
 	if err != nil {
-		RespondToClient(w, "Registration Failed.", http.StatusInternalServerError, "Not as a valid JSON array.")
+		RespondToClient(w, r, "Registration Failed.", http.StatusInternalServerError, "Not as a valid JSON array.")
 		return
 	}
 
 	if recipientsData == nil || len(req.Recipients) == 0 {
-		RespondToClient(w, "Registration Failed.", http.StatusBadRequest, "No recipients provided.")
+		RespondToClient(w, r, "Registration Failed.", http.StatusBadRequest, "No recipients provided.")
 		return
 	}
 
 	emailData, _ := json.Marshal(req)
 	if err := rdb.RPush(ctx, "emailQueue", emailData).Err(); err != nil {
-		RespondToClient(w, "Registration Failed.", http.StatusInternalServerError, err.Error())
+		RespondToClient(w, r, "Registration Failed.", http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	// Store in Redis
 	now := time.Now().UTC()
 	if err := rdb.HSet(r.Context(), uuid.String(), "recipients", recipientsData, "subject", req.Subject, "body", req.Body, "status", "queued", "created_at", now).Err(); err != nil {
-		RespondToClient(w, "Registration Failed.", http.StatusInternalServerError, err.Error())
+		RespondToClient(w, r, "Registration Failed.", http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -174,7 +174,7 @@ func PostEmailHandler(w http.ResponseWriter, r *http.Request) {
 		"created_at": getDateTime(r, now),
 		"status":     "queued",
 	}
-	RespondToClient(w, "Registration Successfully", http.StatusOK, response)
+	RespondToClient(w, r, "Registration Successfully", http.StatusOK, response)
 }
 
 // GetEmailStatusHandler retrieves the status of a dispatched email
@@ -182,17 +182,17 @@ func GetEmailStatusHandler(w http.ResponseWriter, r *http.Request) {
 	req_uuid := r.URL.Query().Get("uuid")
 
 	if _, err := uuid.Parse(req_uuid); err != nil {
-		RespondToClient(w, "Invalid requested UUID", http.StatusBadRequest, nil)
+		RespondToClient(w, r, "Invalid requested UUID", http.StatusBadRequest, nil)
 		return
 	}
 
 	values, err := rdb.HGetAll(r.Context(), req_uuid).Result()
 	if err != nil {
-		RespondToClient(w, "Internal Server Error", http.StatusInternalServerError, err.Error())
+		RespondToClient(w, r, "Internal Server Error", http.StatusInternalServerError, err.Error())
 		return
 	}
 	if len(values) == 0 {
-		RespondToClient(w, "Invalid requested UUID", http.StatusNotFound, nil)
+		RespondToClient(w, r, "Invalid requested UUID", http.StatusNotFound, nil)
 		return
 	}
 
@@ -227,7 +227,7 @@ func GetEmailStatusHandler(w http.ResponseWriter, r *http.Request) {
 		response["error"] = status.Error
 		response["tried_at"] = getDateTime(r, triedAtTime)
 	}
-	RespondToClient(w, "Request Inquiry", http.StatusOK, response)
+	RespondToClient(w, r, "Request Inquiry", http.StatusOK, response)
 }
 
 func SendEmail(recipient []string, subject, body string) error {
