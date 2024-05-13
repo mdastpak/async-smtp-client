@@ -99,6 +99,7 @@ func setupRoutes(router *mux.Router) {
 	router.HandleFunc("/", welcomeHandler).Methods("GET")
 	router.HandleFunc("/submit", PostEmailHandler).Methods("POST")
 	router.HandleFunc("/status", GetEmailStatusHandler).Methods("GET")
+	router.HandleFunc("/health", healthCheck).Methods("GET")
 
 }
 
@@ -127,6 +128,46 @@ func welcomeHandler(w http.ResponseWriter, r *http.Request) {
 		"dt":      getDateTime(r, time.Now()),
 	}
 	RespondToClient(w, r, "Welcome", http.StatusOK, response)
+}
+
+func healthCheck(w http.ResponseWriter, r *http.Request) {
+	redisRes, redisErr := rdb.Ping(ctx).Result()
+
+	smtpHost := os.Getenv("SMTP_HOST")
+	smtpPort := os.Getenv("SMTP_PORT")
+	insecure := os.Getenv("SMTP_INSECURE") == "true"
+
+	// TLS configuration
+	tlsConfig := &tls.Config{
+		ServerName:         smtpHost,
+		InsecureSkipVerify: insecure,
+	}
+
+	// Connect to the SMTP server via TLS
+	conn, smtpErr := tls.Dial("tcp", fmt.Sprintf("%s:%s", smtpHost, smtpPort), tlsConfig)
+	log.Println("smtpErr", smtpErr)
+
+	if smtpErr == nil {
+		conn.Close()
+	}
+
+	status := "ok"
+	if redisErr != nil || smtpErr != nil {
+		status = "error"
+	}
+	healthReport := map[string]string{
+		"overall_status": status,
+		"redis_status":   redisRes,
+		"smtp_status": func() string {
+			if smtpErr == nil {
+				return "ok"
+			} else {
+				return "error"
+			}
+		}(),
+	}
+	RespondToClient(w, r, "Health Check", http.StatusOK, healthReport)
+	// json.NewEncoder(w).Encode(healthReport)
 }
 
 // PostEmailHandler handles incoming email dispatch requests
