@@ -248,6 +248,17 @@ func GetEmailStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	delete(values, "req") // Delete the "req" key instead of assigning nil
+	createdAt, _ := time.Parse(time.RFC3339, values["created_at"])
+	values["created_at"] = getDateTime(r, createdAt)
+
+	if scheduledAt, err := time.Parse(time.RFC3339, values["scheduled_at"]); err != nil || scheduledAt.IsZero() {
+		delete(values, "scheduled_at")
+	}
+	log.Println(values)
+
+	if sentAt, err := time.Parse(time.RFC3339, values["sent_at"]); err != nil || sentAt.IsZero() {
+		values["sent_at"] = getDateTime(r, sentAt)
+	}
 
 	RespondToClient(w, "Email status retrieved", http.StatusOK, values)
 }
@@ -343,24 +354,37 @@ func EmailSendingWorker() {
 			continue
 		}
 
+		recipientsData, err := json.Marshal(req) // Serialize the `To` field which is a []string
+		if err != nil {
+			log.Printf("Failed to serialize recipients: %v", err)
+			continue
+		}
+
 		if err := SendEmail(req); err != nil {
 			log.Printf("Failed to send email: %v", err)
 			// Update Redis with failed status
-			rdb.HSet(ctx, req.UUID.String(), map[string]interface{}{
+
+			if err := rdb.HSet(ctx, req.UUID.String(), map[string]interface{}{
 				"status":   "failed",
 				"error":    err.Error(),
 				"tried_at": time.Now().UTC(),
-			})
+				"req":      recipientsData,
+			}).Err(); err != nil {
+				log.Printf("Failed to update email status: %v", err)
+			}
 			continue
 
 		}
 		// Update Redis with sent status
-		rdb.HSet(ctx, req.UUID.String(), map[string]interface{}{
-			"status":     "sent",
-			"sent_at":    time.Now().UTC(),
-			"created_at": req.CreatedAt,
-			"req":        emailData,
-		})
+		if err := rdb.HSet(ctx, req.UUID.String(), map[string]interface{}{
+			"status":       "sent",
+			"sent_at":      time.Now().UTC(),
+			"created_at":   req.CreatedAt,
+			"scheduled_at": req.ScheduledAt,
+			"req":          recipientsData,
+		}).Err(); err != nil {
+			log.Printf("Failed to update email status: %v", err)
+		}
 		log.Println("Email sent successfully")
 
 	}
