@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/mail"
 	"net/smtp"
 	"strings"
 	"time"
@@ -30,7 +33,7 @@ type Config struct {
 	SMTPUsername    string `mapstructure:"SMTP_USERNAME"`
 	SMTPSenderTitle string `mapstructure:"SMTP_SENDER_TITLE"`
 	SMTPPassword    string `mapstructure:"SMTP_PASSWORD"`
-	SMTPInsecure    bool   `mapstructure:"SMTP_INSECURE"`
+	APIKey          string `mapstructure:"API_KEY"`
 }
 
 type EmailRequest struct {
@@ -64,7 +67,13 @@ func LoadConfig() (Config, error) {
 	}
 
 	err := viper.Unmarshal(&config)
-	return config, err
+	if err != nil {
+		return config, err
+	}
+	if strings.TrimSpace(config.APIKey) == "" {
+		return config, fmt.Errorf("API_KEY must be configured")
+	}
+	return config, nil
 }
 
 func NewRedisClient(lc fx.Lifecycle, config Config) *redis.Client {
@@ -97,9 +106,21 @@ func NewRouter() *mux.Router {
 
 func RegisterHandlers(router *mux.Router, app *Application) {
 	router.HandleFunc("/", app.welcomeHandler).Methods("GET")
-	router.HandleFunc("/submit", app.PostEmailHandler).Methods("POST")
-	router.HandleFunc("/status", app.GetEmailStatusHandler).Methods("GET")
+	router.Handle("/submit", app.requireAPIKey(http.HandlerFunc(app.PostEmailHandler))).Methods("POST")
+	router.Handle("/status", app.requireAPIKey(http.HandlerFunc(app.GetEmailStatusHandler))).Methods("GET")
 	router.HandleFunc("/health", app.healthCheck).Methods("GET")
+}
+
+func (app *Application) requireAPIKey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provided := r.Header.Get("X-API-Key")
+		if app.config.APIKey == "" ||
+			subtle.ConstantTimeCompare([]byte(provided), []byte(app.config.APIKey)) != 1 {
+			RespondToClient(w, "Unauthorized", http.StatusUnauthorized, nil)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func StartHTTPServer(lc fx.Lifecycle, config Config, router *mux.Router) {
@@ -153,8 +174,7 @@ func (app *Application) checkSMTPConnection() error {
 	smtpHost := app.config.SMTPServer
 	smtpPort := app.config.SMTPPort
 	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%s", smtpHost, smtpPort), &tls.Config{
-		ServerName:         smtpHost,
-		InsecureSkipVerify: app.config.SMTPInsecure,
+		ServerName: smtpHost,
 	})
 	if err != nil {
 		return err
@@ -174,9 +194,40 @@ func (app *Application) PostEmailHandler(w http.ResponseWriter, r *http.Request)
 	ctx := r.Context()
 	var req EmailRequest
 	res := make(map[string]interface{})
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		RespondToClient(w, "Request decoding failed", http.StatusBadRequest, err.Error())
 		return
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		RespondToClient(w, "Request must contain a single JSON object", http.StatusBadRequest, nil)
+		return
+	}
+	if len(req.To) == 0 || len(req.To)+len(req.Cc)+len(req.Bcc) > 100 {
+		RespondToClient(w, "At least one recipient and at most 100 recipients are required", http.StatusBadRequest, nil)
+		return
+	}
+	if len(req.Subject) > 998 || len(req.Body) > 1<<20 {
+		RespondToClient(w, "Subject or body is too large", http.StatusBadRequest, nil)
+		return
+	}
+	if strings.ContainsAny(req.Subject, "\r\n") {
+		RespondToClient(w, "Subject contains invalid characters", http.StatusBadRequest, nil)
+		return
+	}
+	recipients := make([]string, 0, len(req.To)+len(req.Cc)+len(req.Bcc))
+	recipients = append(recipients, req.To...)
+	recipients = append(recipients, req.Cc...)
+	recipients = append(recipients, req.Bcc...)
+	for _, recipient := range recipients {
+		parsed, err := mail.ParseAddress(recipient)
+		if err != nil || parsed.Address != recipient || strings.ContainsAny(recipient, "\r\n") {
+			RespondToClient(w, "Recipient contains an invalid email address", http.StatusBadRequest, nil)
+			return
+		}
 	}
 
 	if !req.ScheduledAt.IsZero() {
@@ -266,8 +317,7 @@ func (app *Application) SendEmail(ctx context.Context, req EmailRequest) error {
 	password := app.config.SMTPPassword
 
 	tlsConfig := &tls.Config{
-		ServerName:         smtpHost,
-		InsecureSkipVerify: app.config.SMTPInsecure,
+		ServerName: smtpHost,
 	}
 
 	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%s", smtpHost, smtpPort), tlsConfig)
